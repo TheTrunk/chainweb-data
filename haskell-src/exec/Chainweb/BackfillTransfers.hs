@@ -26,6 +26,7 @@ import           Control.Lens hiding ((<.), reuse)
 import qualified Data.Aeson as A
 import           Data.Aeson.Lens
 import qualified Data.Pool as P
+import qualified Data.Text as T
 import qualified Data.Text.Read as TR
 
 import           Database.Beam hiding (insert)
@@ -34,6 +35,11 @@ import           Database.Beam.Postgres.Full
 import           Database.PostgreSQL.Simple
 
 import           System.Logger.Types hiding (logg)
+
+-- | Remove null bytes from Text to prevent PostgreSQL errors.
+-- PostgreSQL TEXT and VARCHAR columns cannot store the null character (\u0000).
+sanitizeText :: T.Text -> T.Text
+sanitizeText = T.filter (/= '\0')
 
 -- backfill an empty transfers table (steps)
 -- 1. check if transfers table is actually empty. If so, wait until server fills some rows near "top" to start backfill
@@ -107,14 +113,14 @@ createTransfer ev = do
         <*> pure (_ev_chainid ev)
         <*> pure (_ev_height ev)
         <*> pure (_ev_idx ev)
-        <*> pure (_ev_module ev)
-        <*> pure (_ev_moduleHash ev)
+        <*> pure (sanitizeText $ _ev_module ev)
+        <*> pure (sanitizeText $ _ev_moduleHash ev)
         <*> from_acct
         <*> to_acct
         <*> getAmount (unwrap $ _ev_params ev)
   where
-    from_acct = _ev_params ev ^? to unwrap . ix 0 . _String
-    to_acct = _ev_params ev ^? to unwrap . ix 1 . _String
+    from_acct = fmap sanitizeText $ _ev_params ev ^? to unwrap . ix 0 . _String
+    to_acct = fmap sanitizeText $ _ev_params ev ^? to unwrap . ix 1 . _String
     unwrap (PgJSONB a) = a
     lengthThree = \case
       [_,_,_] -> True

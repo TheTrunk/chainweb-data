@@ -64,6 +64,7 @@ import           Data.String (fromString)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Text.Read as TR
+import qualified Data.Char as C
 import           Data.Time.Clock (UTCTime)
 import           Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import           Data.Tuple.Strict (T2(..))
@@ -73,6 +74,11 @@ import           Network.HTTP.Client hiding (Proxy)
 import           Network.HTTP.Types
 import qualified System.Logger.Types as Logger
 import           Text.Printf
+
+-- | Remove null bytes from Text to prevent PostgreSQL errors.
+-- PostgreSQL TEXT and VARCHAR columns cannot store the null character (\u0000).
+sanitizeText :: T.Text -> T.Text
+sanitizeText = T.filter (/= '\0')
 
 data ErrorType = RateLimiting | ClientError | ServerError | OtherError T.Text
   deriving (Eq,Ord,Show)
@@ -227,8 +233,8 @@ mkTransferRows height cid@(ChainId cid') blockhash _creationTime pl eventMinHeig
     mkTransfer mReqKey ev = do
       let (PgJSONB params) = _ev_params ev
       amount <- getAmount params
-      fromAccount <- params ^? ix 0 . _String
-      toAccount <- params ^? ix 1 . _String
+      fromAccount <- fmap sanitizeText $ params ^? ix 0 . _String
+      toAccount <- fmap sanitizeText $ params ^? ix 1 . _String
       return Transfer
         {
           _tr_block = BlockId blockhash
@@ -236,8 +242,8 @@ mkTransferRows height cid@(ChainId cid') blockhash _creationTime pl eventMinHeig
         , _tr_chainid = fromIntegral cid'
         , _tr_height = height
         , _tr_idx = _ev_idx ev
-        , _tr_modulename = _ev_module ev
-        , _tr_moduleHash = _ev_moduleHash ev
+        , _tr_modulename = sanitizeText $ _ev_module ev
+        , _tr_moduleHash = sanitizeText $ _ev_moduleHash ev
         , _tr_from_acct = fromAccount
         , _tr_to_acct = toAccount
         , _tr_amount = amount
@@ -259,7 +265,7 @@ mkTransferRows height cid@(ChainId cid') blockhash _creationTime pl eventMinHeig
     createNonCoinBaseTransfers xs = [ transfer
       | (txhash,_,evs) <- xs
       , ev <- evs
-      , T.takeEnd 8 (_ev_qualName ev) == "TRANSFER"
+      , T.takeEnd 8 (sanitizeText $ _ev_qualName ev) == "TRANSFER"
       , length (unwrap (_ev_params ev)) == 3
       , transfer <- maybeToList $ mkTransfer (Just txhash) ev
       ]
@@ -272,11 +278,11 @@ mkTransactionSigners t = zipWith3 mkSigner signers sigs [0..]
     mkSigner signer sig idx = Signer
       (DbHash $ hashB64U $ CW._transaction_hash t)
       idx
-      (CW._signer_pubKey signer)
-      (CW._signer_scheme signer)
-      (CW._signer_addr signer)
+      (sanitizeText $ CW._signer_pubKey signer)
+      (fmap sanitizeText $ CW._signer_scheme signer)
+      (fmap sanitizeText $ CW._signer_addr signer)
       (PgJSONB $ map toJSON $ CW._signer_capList signer)
-      (Signature $ unSig sig)
+      (Signature $ sanitizeText $ unSig sig)
 
 mkCoinbaseEvents :: Int64 -> ChainId -> DbHash BlockHash -> BlockPayloadWithOutputs -> [Event]
 mkCoinbaseEvents height cid blockhash pl = _blockPayloadWithOutputs_coinbase pl
@@ -288,7 +294,7 @@ mkCoinbaseEvents height cid blockhash pl = _blockPayloadWithOutputs_coinbase pl
     coinbaseTO (Coinbase t) = t
 
 bpwoMinerKeys :: BlockPayloadWithOutputs -> [T.Text]
-bpwoMinerKeys = _minerData_publicKeys . _blockPayloadWithOutputs_minerData
+bpwoMinerKeys = map sanitizeText . _minerData_publicKeys . _blockPayloadWithOutputs_minerData
 
 mkTransaction :: Block -> (CW.Transaction, TransactionOutput) -> Transaction
 mkTransaction b (tx,txo) = Transaction
@@ -300,15 +306,15 @@ mkTransaction b (tx,txo) = Transaction
   , _tx_ttl = fromIntegral $ _chainwebMeta_ttl mta
   , _tx_gasLimit = fromIntegral $ _chainwebMeta_gasLimit mta
   , _tx_gasPrice = realToFrac $ _chainwebMeta_gasPrice mta
-  , _tx_sender = _chainwebMeta_sender mta
-  , _tx_nonce = _pactCommand_nonce cmd
-  , _tx_code = _exec_code <$> exc
-  , _tx_pactId = DbHash . _cont_pactId <$> cnt
+  , _tx_sender = sanitizeText $ _chainwebMeta_sender mta
+  , _tx_nonce = sanitizeText $ _pactCommand_nonce cmd
+  , _tx_code = sanitizeText . _exec_code <$> exc
+  , _tx_pactId = DbHash . sanitizeText . _cont_pactId <$> cnt
   , _tx_rollback = _cont_rollback <$> cnt
   , _tx_step = fromIntegral . _cont_step <$> cnt
   , _tx_data = (PgJSONB . _cont_data <$> cnt)
     <|> (PgJSONB <$> (exc >>= _exec_data))
-  , _tx_proof = join (_cont_proof <$> cnt)
+  , _tx_proof = sanitizeText <$> join (_cont_proof <$> cnt)
 
   , _tx_gas = fromIntegral $ _toutGas txo
   , _tx_badResult = badres
@@ -346,11 +352,11 @@ mkEvent (ChainId chainid) height block requestkey ev idx = Event
     , _ev_chainid = fromIntegral chainid
     , _ev_height = height
     , _ev_idx = idx
-    , _ev_name = ename ev
-    , _ev_qualName = qname ev
-    , _ev_module = emodule ev
-    , _ev_moduleHash = emoduleHash ev
-    , _ev_paramText = T.decodeUtf8 $ toStrict $ encode $ params ev
+    , _ev_name = sanitizeText $ ename ev
+    , _ev_qualName = sanitizeText $ qname ev
+    , _ev_module = sanitizeText $ emodule ev
+    , _ev_moduleHash = sanitizeText $ emoduleHash ev
+    , _ev_paramText = sanitizeText $ T.decodeUtf8 $ toStrict $ encode $ params ev
     , _ev_params = PgJSONB $ toList $ params ev
     }
   where

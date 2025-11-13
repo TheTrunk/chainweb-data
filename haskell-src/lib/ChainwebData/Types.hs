@@ -38,6 +38,13 @@ import           Network.Wai.EventSource.Streaming
 
 ---
 
+-- | Remove null bytes from Text to prevent PostgreSQL errors.
+-- PostgreSQL TEXT and VARCHAR columns cannot store the null character (\u0000).
+sanitizeText :: T.Text -> T.Text
+sanitizeText = T.filter (/= '\0')
+
+---
+
 data PowHeader = PowHeader
   { _hwp_header :: BlockHeader
   , _hwp_powHash :: T.Text }
@@ -63,8 +70,8 @@ asBlock (PowHeader bh ph) m = Block
   , _block_nonce        = _blockHeader_nonce bh
   , _block_flags        = _blockHeader_flags bh
   , _block_powHash      = DbHash ph
-  , _block_miner_acc    = _minerData_account m
-  , _block_miner_pred   = _minerData_predicate m }
+  , _block_miner_acc    = sanitizeText $ _minerData_account m
+  , _block_miner_pred   = sanitizeText $ _minerData_predicate m }
 
 -- | Convert to the "pretty" hash representation that URLs, etc., expect.
 hashToDbHash :: Hash -> DbHash t
