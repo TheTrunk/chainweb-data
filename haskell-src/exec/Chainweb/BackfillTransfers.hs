@@ -28,6 +28,7 @@ import           Data.Aeson.Lens
 import qualified Data.Pool as P
 import qualified Data.Text as T
 import qualified Data.Text.Read as TR
+import           Debug.Trace (trace)
 
 import           Database.Beam hiding (insert)
 import           Database.Beam.Postgres
@@ -35,11 +36,26 @@ import           Database.Beam.Postgres.Full
 import           Database.PostgreSQL.Simple
 
 import           System.Logger.Types hiding (logg)
+import           Text.Printf
 
 -- | Remove null bytes from Text to prevent PostgreSQL errors.
 -- PostgreSQL TEXT and VARCHAR columns cannot store the null character (\u0000).
+-- Logs when null bytes are found for debugging.
 sanitizeText :: T.Text -> T.Text
-sanitizeText = T.filter (/= '\0')
+sanitizeText txt =
+  if T.any (== '\0') txt
+  then trace (printf "[NULL BYTE BACKFILL] Length: %d, Preview: %s" (T.length txt) (T.take 100 txt))
+             (T.filter (/= '\0') txt)
+  else txt
+
+-- | Sanitize with context information for better debugging
+sanitizeTextWithContext :: String -> Int64 -> T.Text -> T.Text
+sanitizeTextWithContext fieldName height txt =
+  if T.any (== '\0') txt
+  then trace (printf "[NULL BYTE BACKFILL] Field: %s, Height: %d, Length: %d, Preview: %s"
+                     fieldName height (T.length txt) (T.take 100 txt))
+             (T.filter (/= '\0') txt)
+  else txt
 
 -- backfill an empty transfers table (steps)
 -- 1. check if transfers table is actually empty. If so, wait until server fills some rows near "top" to start backfill
@@ -107,20 +123,22 @@ chainMinHeights = runSelectReturningList $ select $ aggregate_ (\t -> (group_ (_
 createTransfer :: Event -> Maybe Transfer
 createTransfer ev = do
       guard $ lengthThree $ unwrap $ _ev_params ev
+      let height = _ev_height ev
       Transfer
         <$> pure (_ev_block ev)
         <*> pure (_ev_requestkey ev)
         <*> pure (_ev_chainid ev)
-        <*> pure (_ev_height ev)
+        <*> pure height
         <*> pure (_ev_idx ev)
-        <*> pure (sanitizeText $ _ev_module ev)
-        <*> pure (sanitizeText $ _ev_moduleHash ev)
+        <*> pure (sanitizeTextWithContext "backfill.module" height $ _ev_module ev)
+        <*> pure (sanitizeTextWithContext "backfill.moduleHash" height $ _ev_moduleHash ev)
         <*> from_acct
         <*> to_acct
         <*> getAmount (unwrap $ _ev_params ev)
   where
-    from_acct = fmap sanitizeText $ _ev_params ev ^? to unwrap . ix 0 . _String
-    to_acct = fmap sanitizeText $ _ev_params ev ^? to unwrap . ix 1 . _String
+    height = _ev_height ev
+    from_acct = fmap (sanitizeTextWithContext "backfill.from_acct" height) $ _ev_params ev ^? to unwrap . ix 0 . _String
+    to_acct = fmap (sanitizeTextWithContext "backfill.to_acct" height) $ _ev_params ev ^? to unwrap . ix 1 . _String
     unwrap (PgJSONB a) = a
     lengthThree = \case
       [_,_,_] -> True

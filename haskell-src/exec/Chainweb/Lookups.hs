@@ -65,6 +65,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Text.Read as TR
 import qualified Data.Char as C
+import           Debug.Trace (trace)
 import           Data.Time.Clock (UTCTime)
 import           Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import           Data.Tuple.Strict (T2(..))
@@ -77,8 +78,22 @@ import           Text.Printf
 
 -- | Remove null bytes from Text to prevent PostgreSQL errors.
 -- PostgreSQL TEXT and VARCHAR columns cannot store the null character (\u0000).
+-- Logs when null bytes are found for debugging.
 sanitizeText :: T.Text -> T.Text
-sanitizeText = T.filter (/= '\0')
+sanitizeText txt =
+  if T.any (== '\0') txt
+  then trace (printf "[NULL BYTE DETECTED] Length: %d, Preview: %s" (T.length txt) (T.take 100 txt))
+             (T.filter (/= '\0') txt)
+  else txt
+
+-- | Sanitize with context information for better debugging
+sanitizeTextWithContext :: String -> Int64 -> T.Text -> T.Text
+sanitizeTextWithContext fieldName height txt =
+  if T.any (== '\0') txt
+  then trace (printf "[NULL BYTE] Field: %s, Height: %d, Length: %d, Preview: %s"
+                     fieldName height (T.length txt) (T.take 100 txt))
+             (T.filter (/= '\0') txt)
+  else txt
 
 data ErrorType = RateLimiting | ClientError | ServerError | OtherError T.Text
   deriving (Eq,Ord,Show)
@@ -233,8 +248,8 @@ mkTransferRows height cid@(ChainId cid') blockhash _creationTime pl eventMinHeig
     mkTransfer mReqKey ev = do
       let (PgJSONB params) = _ev_params ev
       amount <- getAmount params
-      fromAccount <- fmap sanitizeText $ params ^? ix 0 . _String
-      toAccount <- fmap sanitizeText $ params ^? ix 1 . _String
+      fromAccount <- fmap (sanitizeTextWithContext "transfer.from_acct" height) $ params ^? ix 0 . _String
+      toAccount <- fmap (sanitizeTextWithContext "transfer.to_acct" height) $ params ^? ix 1 . _String
       return Transfer
         {
           _tr_block = BlockId blockhash
@@ -242,8 +257,8 @@ mkTransferRows height cid@(ChainId cid') blockhash _creationTime pl eventMinHeig
         , _tr_chainid = fromIntegral cid'
         , _tr_height = height
         , _tr_idx = _ev_idx ev
-        , _tr_modulename = sanitizeText $ _ev_module ev
-        , _tr_moduleHash = sanitizeText $ _ev_moduleHash ev
+        , _tr_modulename = sanitizeTextWithContext "transfer.modulename" height $ _ev_module ev
+        , _tr_moduleHash = sanitizeTextWithContext "transfer.moduleHash" height $ _ev_moduleHash ev
         , _tr_from_acct = fromAccount
         , _tr_to_acct = toAccount
         , _tr_amount = amount
@@ -271,18 +286,19 @@ mkTransferRows height cid@(ChainId cid') blockhash _creationTime pl eventMinHeig
       ]
 
 mkTransactionSigners :: CW.Transaction -> [Signer]
-mkTransactionSigners t = zipWith3 mkSigner signers sigs [0..]
+mkTransactionSigners t = zipWith3 (mkSigner 0) signers sigs [0..]
+  -- Note: Height not available here, using 0 as placeholder
   where
     signers = _pactCommand_signers $ CW._transaction_cmd t
     sigs = CW._transaction_sigs t
-    mkSigner signer sig idx = Signer
+    mkSigner height signer sig idx = Signer
       (DbHash $ hashB64U $ CW._transaction_hash t)
       idx
-      (sanitizeText $ CW._signer_pubKey signer)
-      (fmap sanitizeText $ CW._signer_scheme signer)
-      (fmap sanitizeText $ CW._signer_addr signer)
+      (sanitizeTextWithContext "signer.pubkey" height $ CW._signer_pubKey signer)
+      (fmap (sanitizeTextWithContext "signer.scheme" height) $ CW._signer_scheme signer)
+      (fmap (sanitizeTextWithContext "signer.addr" height) $ CW._signer_addr signer)
       (PgJSONB $ map toJSON $ CW._signer_capList signer)
-      (Signature $ sanitizeText $ unSig sig)
+      (Signature $ sanitizeTextWithContext "signer.sig" height $ unSig sig)
 
 mkCoinbaseEvents :: Int64 -> ChainId -> DbHash BlockHash -> BlockPayloadWithOutputs -> [Event]
 mkCoinbaseEvents height cid blockhash pl = _blockPayloadWithOutputs_coinbase pl
@@ -301,20 +317,20 @@ mkTransaction b (tx,txo) = Transaction
   { _tx_requestKey = DbHash $ hashB64U $ CW._transaction_hash tx
   , _tx_block = pk b
   , _tx_chainId = _block_chainId b
-  , _tx_height = _block_height b
+  , _tx_height = height
   , _tx_creationTime = posixSecondsToUTCTime $ _chainwebMeta_creationTime mta
   , _tx_ttl = fromIntegral $ _chainwebMeta_ttl mta
   , _tx_gasLimit = fromIntegral $ _chainwebMeta_gasLimit mta
   , _tx_gasPrice = realToFrac $ _chainwebMeta_gasPrice mta
-  , _tx_sender = sanitizeText $ _chainwebMeta_sender mta
-  , _tx_nonce = sanitizeText $ _pactCommand_nonce cmd
-  , _tx_code = sanitizeText . _exec_code <$> exc
-  , _tx_pactId = DbHash . sanitizeText . _cont_pactId <$> cnt
+  , _tx_sender = sanitizeTextWithContext "tx.sender" height $ _chainwebMeta_sender mta
+  , _tx_nonce = sanitizeTextWithContext "tx.nonce" height $ _pactCommand_nonce cmd
+  , _tx_code = sanitizeTextWithContext "tx.code" height . _exec_code <$> exc
+  , _tx_pactId = DbHash . sanitizeTextWithContext "tx.pactId" height . _cont_pactId <$> cnt
   , _tx_rollback = _cont_rollback <$> cnt
   , _tx_step = fromIntegral . _cont_step <$> cnt
   , _tx_data = (PgJSONB . _cont_data <$> cnt)
     <|> (PgJSONB <$> (exc >>= _exec_data))
-  , _tx_proof = sanitizeText <$> join (_cont_proof <$> cnt)
+  , _tx_proof = sanitizeTextWithContext "tx.proof" height <$> join (_cont_proof <$> cnt)
 
   , _tx_gas = fromIntegral $ _toutGas txo
   , _tx_badResult = badres
@@ -326,6 +342,7 @@ mkTransaction b (tx,txo) = Transaction
   , _tx_numEvents = Just $ fromIntegral $ length $ _toutEvents txo
   }
   where
+    height = _block_height b
     cmd = CW._transaction_cmd tx
     mta = _pactCommand_meta cmd
     pay = _pactCommand_payload cmd
@@ -352,11 +369,11 @@ mkEvent (ChainId chainid) height block requestkey ev idx = Event
     , _ev_chainid = fromIntegral chainid
     , _ev_height = height
     , _ev_idx = idx
-    , _ev_name = sanitizeText $ ename ev
-    , _ev_qualName = sanitizeText $ qname ev
-    , _ev_module = sanitizeText $ emodule ev
-    , _ev_moduleHash = sanitizeText $ emoduleHash ev
-    , _ev_paramText = sanitizeText $ T.decodeUtf8 $ toStrict $ encode $ params ev
+    , _ev_name = sanitizeTextWithContext "event.name" height $ ename ev
+    , _ev_qualName = sanitizeTextWithContext "event.qualName" height $ qname ev
+    , _ev_module = sanitizeTextWithContext "event.module" height $ emodule ev
+    , _ev_moduleHash = sanitizeTextWithContext "event.moduleHash" height $ emoduleHash ev
+    , _ev_paramText = sanitizeTextWithContext "event.paramText" height $ T.decodeUtf8 $ toStrict $ encode $ params ev
     , _ev_params = PgJSONB $ toList $ params ev
     }
   where
