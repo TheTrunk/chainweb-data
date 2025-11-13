@@ -32,14 +32,14 @@ jobs:
         ghc --version
         cabal --version
     # Project Setup
-    - uses: actions/cache@v2
+    - uses: actions/cache@v4
       name: Cache dist-newstyle
       with:
         path: |
           ~/.cabal/packages
           ~/.cabal/store
           dist-newstyle
-        key: ${{ matrix.os }}-${{ matrix.ghc }}-4-cabal
+        key: ${{ matrix.os }}-${{ matrix.ghc }}-5-cabal
 
     # System dependencies
     - name: Install liblzma
