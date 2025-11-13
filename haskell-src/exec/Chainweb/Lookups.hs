@@ -74,6 +74,19 @@ import           Network.HTTP.Types
 import qualified System.Logger.Types as Logger
 import           Text.Printf
 
+--------------------------------------------------------------------------------
+-- DIAGNOSTIC: Null Byte Detection
+-- This code is for debugging only. It will error out when null bytes are found
+-- to help identify the exact source of the issue.
+--------------------------------------------------------------------------------
+
+checkForNullBytes :: String -> Int64 -> T.Text -> T.Text
+checkForNullBytes fieldName height txt =
+  if T.any (== '\0') txt
+  then error $ printf "\n*** NULL BYTE DETECTED ***\nField: %s\nHeight: %d\nChain: (see logs)\nLength: %d\nPreview: %s\n***\n"
+                      fieldName height (T.length txt) (T.take 200 txt)
+  else txt
+
 data ErrorType = RateLimiting | ClientError | ServerError | OtherError T.Text
   deriving (Eq,Ord,Show)
 
@@ -295,20 +308,20 @@ mkTransaction b (tx,txo) = Transaction
   { _tx_requestKey = DbHash $ hashB64U $ CW._transaction_hash tx
   , _tx_block = pk b
   , _tx_chainId = _block_chainId b
-  , _tx_height = _block_height b
+  , _tx_height = height
   , _tx_creationTime = posixSecondsToUTCTime $ _chainwebMeta_creationTime mta
   , _tx_ttl = fromIntegral $ _chainwebMeta_ttl mta
   , _tx_gasLimit = fromIntegral $ _chainwebMeta_gasLimit mta
   , _tx_gasPrice = realToFrac $ _chainwebMeta_gasPrice mta
-  , _tx_sender = _chainwebMeta_sender mta
-  , _tx_nonce = _pactCommand_nonce cmd
-  , _tx_code = _exec_code <$> exc
-  , _tx_pactId = DbHash . _cont_pactId <$> cnt
+  , _tx_sender = checkForNullBytes "tx.sender" height $ _chainwebMeta_sender mta
+  , _tx_nonce = checkForNullBytes "tx.nonce" height $ _pactCommand_nonce cmd
+  , _tx_code = checkForNullBytes "tx.code" height . _exec_code <$> exc
+  , _tx_pactId = DbHash . checkForNullBytes "tx.pactId" height . _cont_pactId <$> cnt
   , _tx_rollback = _cont_rollback <$> cnt
   , _tx_step = fromIntegral . _cont_step <$> cnt
   , _tx_data = (PgJSONB . _cont_data <$> cnt)
     <|> (PgJSONB <$> (exc >>= _exec_data))
-  , _tx_proof = join (_cont_proof <$> cnt)
+  , _tx_proof = checkForNullBytes "tx.proof" height <$> join (_cont_proof <$> cnt)
 
   , _tx_gas = fromIntegral $ _toutGas txo
   , _tx_badResult = badres
@@ -320,6 +333,7 @@ mkTransaction b (tx,txo) = Transaction
   , _tx_numEvents = Just $ fromIntegral $ length $ _toutEvents txo
   }
   where
+    height = _block_height b
     cmd = CW._transaction_cmd tx
     mta = _pactCommand_meta cmd
     pay = _pactCommand_payload cmd
@@ -346,11 +360,11 @@ mkEvent (ChainId chainid) height block requestkey ev idx = Event
     , _ev_chainid = fromIntegral chainid
     , _ev_height = height
     , _ev_idx = idx
-    , _ev_name = ename ev
-    , _ev_qualName = qname ev
-    , _ev_module = emodule ev
-    , _ev_moduleHash = emoduleHash ev
-    , _ev_paramText = T.decodeUtf8 $ toStrict $ encode $ params ev
+    , _ev_name = checkForNullBytes "event.name" height $ ename ev
+    , _ev_qualName = checkForNullBytes "event.qualName" height $ qname ev
+    , _ev_module = checkForNullBytes "event.module" height $ emodule ev
+    , _ev_moduleHash = checkForNullBytes "event.moduleHash" height $ emoduleHash ev
+    , _ev_paramText = checkForNullBytes "event.paramText" height $ T.decodeUtf8 $ toStrict $ encode $ params ev
     , _ev_params = PgJSONB $ toList $ params ev
     }
   where
