@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.4.1 (2025-11-13)
+
+* Fix PostgreSQL null byte error by sanitizing all text fields before database insertion
+
 ## 2.4.0 (2023-12-21)
 
 * Use CW-N's new block endpoint for history fill operations (#162)
